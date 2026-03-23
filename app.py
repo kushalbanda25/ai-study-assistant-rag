@@ -6,6 +6,7 @@ from PyPDF2 import PdfReader
 import re
 import pickle
 import os
+import time
 import requests
 
 # ─────────────────────────────────────────────
@@ -19,115 +20,115 @@ st.set_page_config(
 )
 
 # ─────────────────────────────────────────────
-#  GLOBAL STYLES (Premium ChatGPT-like)
+#  GLOBAL STYLES
 # ─────────────────────────────────────────────
 st.markdown("""
 <style>
-/* ── Base ── */
 html, body, [data-testid="stAppViewContainer"] {
-    background: #0f1117;
-    color: #e6edf3;
-    font-family: 'Inter', -apple-system, sans-serif;
+    background: #0f0f0f;
+    color: #ececec;
+    font-family: 'Segoe UI', sans-serif;
 }
-
-/* ── Sidebar ── */
 [data-testid="stSidebar"] {
-    background: #161b22;
-    border-right: 1px solid #30363d;
+    background: #1a1a1a;
+    border-right: 1px solid #2a2a2a;
 }
-[data-testid="stSidebar"] * { color: #8b949e !important; }
-
-/* ── Title ── */
-h1 { color: #ffffff !important; font-weight: 700; letter-spacing: -0.05rem; }
-
-/* ── Chat bubbles ── */
+[data-testid="stSidebar"] * { color: #d1d1d1 !important; }
+h1 { color: #ffffff !important; font-weight: 700; letter-spacing: -0.5px; }
 [data-testid="stChatMessage"] {
-    border-radius: 16px;
-    padding: 12px 16px;
-    margin-bottom: 12px;
-    border: 1px solid transparent;
+    border-radius: 12px;
+    padding: 4px 8px;
+    margin-bottom: 6px;
 }
-
-/* User bubble */
-div[data-testid="stChatMessage"]:has(img[alt="user"]) {
-    background: #1e293b;
-    border: 1px solid #334155;
-    margin-left: 20%;
-}
-
-/* Assistant bubble */
-div[data-testid="stChatMessage"]:has(img[alt="assistant"]) {
-    background: #0d1117;
-    border: 1px solid #30363d;
-    margin-right: 15%;
-}
-
-/* ── Chat Input ── */
+div[data-testid="stChatMessage"]:has(img[alt="user"])      { background: #1e1e2e; }
+div[data-testid="stChatMessage"]:has(img[alt="assistant"]) { background: #161b22; }
 [data-testid="stChatInputTextArea"] {
-    background: #0d1117 !important;
-    border: 1px solid #30363d !important;
+    background: #1e1e1e !important;
+    color: #ececec !important;
+    border: 1px solid #3a3a3a !important;
     border-radius: 12px !important;
-    color: #e6edf3 !important;
 }
-
-/* ── Buttons ── */
 .stButton > button {
-    background: #21262d;
-    color: #c9d1d9;
-    border: 1px solid #30363d;
-    border-radius: 8px;
-    font-weight: 500;
+    background: #2d2d2d; color: #ececec;
+    border: 1px solid #3a3a3a; border-radius: 8px;
+    font-size: 0.85rem; transition: background 0.2s;
 }
-.stButton > button:hover {
-    background: #30363d;
-    border-color: #8b949e;
-    color: #ffffff;
-}
-
-/* ── Scrollbar ── */
+.stButton > button:hover { background: #3d3d3d; }
+.stAlert { border-radius: 10px; font-size: 0.9rem; }
+.stSpinner > div { color: #a0a0a0 !important; }
 ::-webkit-scrollbar { width: 6px; }
-::-webkit-scrollbar-thumb { background: #30363d; border-radius: 10px; }
+::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
 </style>
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
-#  MODEL CACHE
+#  PROVIDER CONFIG  (verified March 2026)
 # ─────────────────────────────────────────────
-@st.cache_resource(show_spinner="Initializing AI components...")
-def load_embedding_model():
-    return SentenceTransformer("all-MiniLM-L6-v2")
 
-model = load_embedding_model()
-
-# ─────────────────────────────────────────────
-#  CONSTANTS
-# ─────────────────────────────────────────────
-STORAGE_DIR        = "storage"
-FAISS_PATH         = os.path.join(STORAGE_DIR, "index.faiss")
-CHUNKS_PATH        = os.path.join(STORAGE_DIR, "chunks.pkl")
-OPENROUTER_URL     = "https://openrouter.ai/api/v1/chat/completions"
-
-# Fallback sequence for robustness (skips on 400, 404, 408, 422, 429)
-LLM_MODELS = [
-    "deepseek/deepseek-chat:free",
-    "meta-llama/llama-3.1-8b-instruct:free",
-    "mistralai/mistral-7b-instruct:free",
-    "google/gemini-2.0-flash-exp:free",
-    "openrouter/auto-free" # OpenRouter's auto-router for free models
+# ── OpenRouter ──────────────────────────────
+#  URL  : https://openrouter.ai/api/v1/chat/completions
+#  Auth : Bearer <OPENROUTER_API_KEY>
+#  Free models verified at openrouter.ai/collections/free-models
+OPENROUTER_URL    = "https://openrouter.ai/api/v1/chat/completions"
+OPENROUTER_MODELS = [
+    "openrouter/free",                          # auto-picks best free model
+    "meta-llama/llama-3.3-70b-instruct:free",   # reliable, widely used
+    "nvidia/nemotron-3-super-120b-a12b:free",   # 262K ctx, strong reasoning
+    "arcee-ai/trinity-large-preview:free",      # 400B, 128K ctx
 ]
 
-MAX_CONTEXT_WORDS  = 600
-TOP_K_CHUNKS       = 3
-MAX_HISTORY_TURNS  = 8
+# ── Hugging Face Serverless Inference API ───
+#  URL  : https://api-inference.huggingface.co/models/<model-id>
+#         uses /v1/chat/completions for chat models (OpenAI-compatible)
+#  Auth : Bearer <HF_API_TOKEN>
+#  Free : ~few hundred req/hour for free users (no credit card needed)
+#  Get token at: huggingface.co/settings/tokens  (Read permission)
+HF_BASE_URL    = "https://api-inference.huggingface.co/models"
+HF_CHAT_URL    = "https://api-inference.huggingface.co/v1/chat/completions"  # OpenAI-compat
+HF_MODELS      = [
+    "meta-llama/Llama-3.2-3B-Instruct",        # small, fast, free
+    "meta-llama/Meta-Llama-3-8B-Instruct",     # reliable 8B
+    "HuggingFaceH4/zephyr-7b-beta",            # popular chat model
+    "mistralai/Mistral-7B-Instruct-v0.3",      # Mistral 7B
+]
+
+# ── Groq ────────────────────────────────────
+#  URL  : https://api.groq.com/openai/v1/chat/completions
+#  Auth : Bearer <GROQ_API_KEY>
+#  Free : no credit card needed — very fast (LPU hardware)
+#         Llama 3.3 70B: ~6K tokens/min, 500K tokens/day
+#         Llama 3.1 8B : ~30K tokens/min, 1M tokens/day
+#  Get key at: console.groq.com
+GROQ_URL    = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODELS = [
+    "llama-3.3-70b-versatile",   # best quality on Groq free tier
+    "llama-3.1-8b-instant",      # fastest, higher rate limit
+    "qwen/qwen3-32b",            # Qwen3 32B (March 2026)
+]
+
+# ── Shared constants ────────────────────────
+STORAGE_DIR       = "storage"
+FAISS_PATH        = os.path.join(STORAGE_DIR, "index.faiss")
+CHUNKS_PATH       = os.path.join(STORAGE_DIR, "chunks.pkl")
+MAX_CONTEXT_WORDS = 600
+TOP_K_CHUNKS      = 3
+MAX_HISTORY_TURNS = 6
+RETRY_WAIT_SECS   = 6
+
+PROVIDER_OPTIONS  = ["OpenRouter (free)", "Groq (free)", "Hugging Face (free)"]
 
 # ─────────────────────────────────────────────
-#  UTILITIES
+#  MODEL CACHE
 # ─────────────────────────────────────────────
-def sanitize_text(text: str) -> str:
-    """Strips control characters that break JSON/API requests."""
-    return re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+@st.cache_resource(show_spinner="Loading embedding model…")
+def load_model() -> SentenceTransformer:
+    return SentenceTransformer("all-MiniLM-L6-v2")
 
+embed_model = load_model()
 
+# ─────────────────────────────────────────────
+#  PDF UTILITIES
+# ─────────────────────────────────────────────
 def read_pdf(file) -> str:
     text = ""
     try:
@@ -137,249 +138,454 @@ def read_pdf(file) -> str:
             if content:
                 text += content + " "
     except Exception as e:
-        st.sidebar.error(f"Read error: {e}")
-    return sanitize_text(re.sub(r'\s+', ' ', text).strip())
+        st.sidebar.error(f"Could not read PDF: {e}")
+    return re.sub(r'\s+', ' ', text).strip()
 
 
-def chunk_text(text: str, chunk_size: int = 150) -> list[str]:
+def chunk_text(text: str, chunk_size: int = 120) -> list[str]:
     words = text.split()
     return [" ".join(words[i:i + chunk_size]) for i in range(0, len(words), chunk_size)]
 
 
 # ─────────────────────────────────────────────
-#  RAG & LLM
+#  RAG: RETRIEVE CONTEXT
 # ─────────────────────────────────────────────
-def get_context(query: str) -> str:
-    if not st.session_state.index: return ""
-    
-    query_vec = model.encode([query])
-    k = min(TOP_K_CHUNKS, len(st.session_state.chunks))
-    _, I = st.session_state.index.search(np.array(query_vec), k=k)
-    
-    relevant = [st.session_state.chunks[i] for i in I[0] if i < len(st.session_state.chunks)]
-    return " ".join(relevant)[:MAX_CONTEXT_WORDS * 5]
+def retrieve_context(query: str) -> str:
+    index  = st.session_state.index
+    chunks = st.session_state.chunks
+    query_vec = embed_model.encode([query])
+    k = min(TOP_K_CHUNKS, len(chunks))
+    _, I = index.search(np.array(query_vec), k=k)
+    selected = [chunks[i] for i in I[0] if i < len(chunks)]
+    context_words = []
+    for chunk in selected:
+        words = chunk.split()
+        if len(context_words) + len(words) > MAX_CONTEXT_WORDS:
+            remaining = MAX_CONTEXT_WORDS - len(context_words)
+            if remaining > 0:
+                context_words.extend(words[:remaining])
+            break
+        context_words.extend(words)
+    return " ".join(context_words)
 
 
+# ─────────────────────────────────────────────
+#  LLM HELPERS
+# ─────────────────────────────────────────────
 def build_messages(context: str, question: str, history: list[dict]) -> list[dict]:
-    # Clean, strict instructions for high-quality responses
-    system_instr = (
-        "You are a Senior AI Study Assistant. Help users learn from their material.\n\n"
-        "RULES:\n"
-        "- If context is provided, answer ONLY using that context.\n"
-        "- If the answer is missing from context, say: \"I couldn't find that in your notes.\"\n"
-        "- Structure answers with Markdown: bold headers, bullet points, or numbering.\n"
-        "- Be professional, clear, and direct. Avoid unnecessary conversational filler.\n"
-        "- If referring to specific parts of the context, be precise.\n\n"
-        f"STUDY MATERIAL CONTEXT:\n{context}"
+    system_prompt = (
+        "You are an expert AI study assistant. "
+        "Your job is to help students understand their study material precisely and clearly.\n\n"
+        "## Guidelines\n"
+        "- Answer **only** from the provided context when a factual question is asked.\n"
+        "- If the context does not contain the answer, say: "
+        "\"I couldn't find that in your uploaded notes. Could you check the document or rephrase?\"\n"
+        "- Structure long answers with **Markdown headings**, bullet points, or numbered lists.\n"
+        "- Keep answers concise yet complete. Avoid padding or repetition.\n"
+        "- When greeted or asked a casual question, respond naturally.\n"
+        "- Never fabricate facts or invent information not present in the context.\n"
+        "- If the question is ambiguous, ask a clarifying follow-up.\n\n"
+        f"## Study Context\n{context}"
     )
-    
-    # Universal compatibility: Inject system prompt correctly
-    msgs = [{"role": "system", "content": system_instr}]
-    # Add trimmed conversation history (Last N messages)
-    msgs.extend(history[-(MAX_HISTORY_TURNS * 2):])
-    # Add current question
-    msgs.append({"role": "user", "content": question})
-    return msgs
+    messages: list[dict] = [{"role": "system", "content": system_prompt}]
+    messages.extend(history[-(MAX_HISTORY_TURNS * 2):])
+    messages.append({"role": "user", "content": question})
+    return messages
 
 
-def _call_api(model_id: str, messages: list, api_key: str) -> requests.Response:
-    return requests.post(
-        url=OPENROUTER_URL,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type":  "application/json",
-            "HTTP-Referer":  "http://localhost:8501",
-            "X-Title":       "AI Study Assistant",
-        },
-        json={
-            "model": model_id,
-            "messages": messages,
-            "temperature": 0.3,
-            "max_tokens": 1024,
-        },
-        timeout=15
-    )
-
-
-def ask_llm(context: str, query: str, history: list[dict]) -> str:
-    # Get key from secrets (Cloud) or env (Local)
-    api_key = st.secrets.get("OPENROUTER_API_KEY", os.getenv("OPENROUTER_API_KEY", "")).strip()
-    if not api_key:
-        return "⚠️ **API Key missing.** Please set `OPENROUTER_API_KEY` in Streamlit secrets or environment."
-
-    messages = build_messages(context, query, history)
-    
-    errors = []
-    
-    # Fallback Loop: Skips transient errors (400, 404, 422, 429)
-    for model_id in LLM_MODELS:
-        try:
-            print(f"DEBUG: Attempting model {model_id}...")
-            resp = _call_api(model_id, messages, api_key)
-            
-            # If 401 (Unauthorized) → fail immediately (bad key)
-            if resp.status_code == 401:
-                return "🔑 **Invalid API key.** Please check your `OPENROUTER_API_KEY`."
-                
-            # If model/data error (400, 404, 408, 422, 429) → try next
-            if resp.status_code in (400, 404, 408, 422, 429):
-                try:
-                    msg = resp.json().get("error", {}).get("message", f"Status {resp.status_code}")
-                except:
-                    msg = f"Status {resp.status_code}"
-                
-                err_str = f"Model `{model_id}` → {msg}"
-                print(f"DEBUG: {err_str}")
-                errors.append(err_str)
-                continue
-                
-            resp.raise_for_status()
-            data = resp.json()
-            
-            if "choices" in data and data["choices"]:
-                return data["choices"][0]["message"]["content"].strip()
-                
-            errors.append(f"Model `{model_id}` → Empty response")
-            continue 
-            
-        except Exception as e:
-            err_str = f"Model `{model_id}` → {str(e)[:60]}"
-            print(f"DEBUG: {err_str}")
-            errors.append(err_str)
-            continue 
-            
-    # If all failed, show the specific history
-    err_report = "\n".join([f"- {e}" for e in errors])
-    return (
-        f"🚀 **All models are currently busy.**\n\n"
-        f"**Failure History:**\n{err_report}\n\n"
-        "Please wait 15s and try again, or check your API key / notes content."
-    )
-
-
-# ─────────────────────────────────────────────
-#  SESSION & PERSISTENCE
-# ─────────────────────────────────────────────
-if "index"    not in st.session_state: st.session_state.index = None
-if "chunks"   not in st.session_state: st.session_state.chunks = []
-if "messages" not in st.session_state: st.session_state.messages = []
-if "ready"    not in st.session_state: st.session_state.ready = False
-
-# Auto-restore on start
-if not st.session_state.ready and os.path.exists(FAISS_PATH):
+def _get_secret(key: str) -> str:
+    """Read from Streamlit Secrets first, then env variable."""
+    val = ""
     try:
-        st.session_state.index = faiss.read_index(FAISS_PATH)
+        val = st.secrets.get(key, "")
+    except Exception:
+        pass
+    if not val:
+        val = os.getenv(key, "")
+    return val.strip()
+
+
+def _openai_compat_post(url: str, model_id: str, messages: list,
+                        api_key: str, extra_headers: dict | None = None) -> requests.Response:
+    """Generic OpenAI-compatible POST (used by OpenRouter, Groq, and HF chat endpoint)."""
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type":  "application/json",
+    }
+    if extra_headers:
+        headers.update(extra_headers)
+    return requests.post(
+        url=url,
+        headers=headers,
+        json={
+            "model":       model_id,
+            "messages":    messages,
+            "temperature": 0.3,
+            "max_tokens":  1024,
+        },
+        timeout=45,
+    )
+
+
+def _parse_openai_response(response: requests.Response) -> str | None:
+    """Return content string if valid, else None."""
+    result = response.json()
+    if "choices" in result and result["choices"]:
+        return result["choices"][0]["message"]["content"].strip()
+    return None
+
+
+# ── Provider: OpenRouter ──────────────────────
+def ask_openrouter(context: str, question: str, history: list[dict]) -> str:
+    api_key = _get_secret("OPENROUTER_API_KEY")
+    if not api_key:
+        return (
+            "⚠️ **OpenRouter API key not set.**\n\n"
+            "In Streamlit Secrets add:\n```toml\nOPENROUTER_API_KEY = \"sk-or-v1-...\"\n```\n"
+            "Get a free key at [openrouter.ai/keys](https://openrouter.ai/keys)"
+        )
+    messages = build_messages(context, question, history)
+    for model_id in OPENROUTER_MODELS:
+        try:
+            resp = _openai_compat_post(
+                url=OPENROUTER_URL,
+                model_id=model_id,
+                messages=messages,
+                api_key=api_key,
+                extra_headers={
+                    "HTTP-Referer": "https://ai-study-assistant.streamlit.app",
+                    "X-Title":      "AI Study Assistant",
+                },
+            )
+            if resp.status_code == 404: continue
+            if resp.status_code == 429:
+                time.sleep(RETRY_WAIT_SECS); continue
+            resp.raise_for_status()
+            content = _parse_openai_response(resp)
+            if content:
+                return content
+        except requests.exceptions.Timeout:
+            continue
+        except requests.exceptions.ConnectionError:
+            return "🌐 **Network error.** Check your connection."
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response is not None else 0
+            if status == 401: return "🔑 **Invalid OpenRouter API key.**"
+            if status in (404, 429):
+                if status == 429: time.sleep(RETRY_WAIT_SECS)
+                continue
+            return f"⚠️ **HTTP {status}:** {e}"
+        except Exception as e:
+            return f"⚠️ **Unexpected error:** {e}"
+    return "⚠️ **All OpenRouter free models are rate-limited.** Wait a minute and retry."
+
+
+# ── Provider: Groq ────────────────────────────
+def ask_groq(context: str, question: str, history: list[dict]) -> str:
+    api_key = _get_secret("GROQ_API_KEY")
+    if not api_key:
+        return (
+            "⚠️ **Groq API key not set.**\n\n"
+            "In Streamlit Secrets add:\n```toml\nGROQ_API_KEY = \"gsk_...\"\n```\n"
+            "Get a **free** key (no credit card) at [console.groq.com](https://console.groq.com)"
+        )
+    messages = build_messages(context, question, history)
+    for model_id in GROQ_MODELS:
+        try:
+            resp = _openai_compat_post(
+                url=GROQ_URL,
+                model_id=model_id,
+                messages=messages,
+                api_key=api_key,
+            )
+            if resp.status_code == 404: continue
+            if resp.status_code == 429:
+                time.sleep(RETRY_WAIT_SECS); continue
+            resp.raise_for_status()
+            content = _parse_openai_response(resp)
+            if content:
+                return content
+        except requests.exceptions.Timeout:
+            continue
+        except requests.exceptions.ConnectionError:
+            return "🌐 **Network error.** Check your connection."
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response is not None else 0
+            if status == 401: return "🔑 **Invalid Groq API key.**"
+            if status in (404, 429):
+                if status == 429: time.sleep(RETRY_WAIT_SECS)
+                continue
+            return f"⚠️ **HTTP {status}:** {e}"
+        except Exception as e:
+            return f"⚠️ **Unexpected error:** {e}"
+    return "⚠️ **All Groq models are rate-limited.** Wait a minute and retry."
+
+
+# ── Provider: Hugging Face ────────────────────
+def ask_huggingface(context: str, question: str, history: list[dict]) -> str:
+    api_key = _get_secret("HF_API_TOKEN")
+    if not api_key:
+        return (
+            "⚠️ **Hugging Face token not set.**\n\n"
+            "In Streamlit Secrets add:\n```toml\nHF_API_TOKEN = \"hf_...\"\n```\n"
+            "Get a **free** token (no credit card) at "
+            "[huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) "
+            "(Read permission is enough)"
+        )
+    messages = build_messages(context, question, history)
+    for model_id in HF_MODELS:
+        try:
+            # HF supports OpenAI-compatible /v1/chat/completions for most chat models
+            resp = _openai_compat_post(
+                url=HF_CHAT_URL,
+                model_id=model_id,
+                messages=messages,
+                api_key=api_key,
+            )
+            if resp.status_code in (404, 503):
+                # 503 = model loading, skip to next
+                continue
+            if resp.status_code == 429:
+                time.sleep(RETRY_WAIT_SECS); continue
+            resp.raise_for_status()
+            content = _parse_openai_response(resp)
+            if content:
+                return content
+        except requests.exceptions.Timeout:
+            continue
+        except requests.exceptions.ConnectionError:
+            return "🌐 **Network error.** Check your connection."
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response is not None else 0
+            if status == 401:
+                return "🔑 **Invalid Hugging Face token.** Check `HF_API_TOKEN`."
+            if status in (404, 503, 429):
+                if status == 429: time.sleep(RETRY_WAIT_SECS)
+                continue
+            return f"⚠️ **HTTP {status}:** {e}"
+        except Exception as e:
+            return f"⚠️ **Unexpected error:** {e}"
+    return (
+        "⚠️ **All Hugging Face models are unavailable or loading.**\n\n"
+        "HF free tier allows ~a few hundred requests/hour. "
+        "Try again in a moment or switch to Groq."
+    )
+
+
+# ── Router ────────────────────────────────────
+def ask_llm(context: str, question: str, history: list[dict]) -> str:
+    provider = st.session_state.get("provider", PROVIDER_OPTIONS[0])
+    if provider.startswith("OpenRouter"):
+        return ask_openrouter(context, question, history)
+    elif provider.startswith("Groq"):
+        return ask_groq(context, question, history)
+    else:
+        return ask_huggingface(context, question, history)
+
+
+# ─────────────────────────────────────────────
+#  SESSION STATE INIT
+# ─────────────────────────────────────────────
+for key, default in [
+    ("index",    None),
+    ("chunks",   []),
+    ("messages", []),
+    ("loaded",   False),
+    ("provider", PROVIDER_OPTIONS[0]),
+]:
+    if key not in st.session_state:
+        st.session_state[key] = default
+
+# ─────────────────────────────────────────────
+#  AUTO-LOAD SAVED FAISS INDEX
+# ─────────────────────────────────────────────
+if not st.session_state.loaded and os.path.exists(FAISS_PATH):
+    try:
+        st.session_state.index  = faiss.read_index(FAISS_PATH)
         with open(CHUNKS_PATH, "rb") as f:
             st.session_state.chunks = pickle.load(f)
-        st.session_state.ready = True
-    except: pass
+        st.session_state.loaded = True
+    except Exception as e:
+        st.sidebar.warning(f"Could not restore saved index: {e}")
 
 # ─────────────────────────────────────────────
 #  SIDEBAR
 # ─────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("### 📂 Your Study Library")
-    uploaded = st.file_uploader("Upload PDFs", type="pdf", accept_multiple_files=True, label_visibility="collapsed")
-    
+    st.markdown("## 📘 AI Study Assistant")
     st.markdown("---")
-    
-    col_a, col_b = st.columns(2)
-    with col_a:
-        do_process = st.button("🚀 Process", use_container_width=True)
-    with col_b:
-        do_clear = st.button("🗑️ Clear", use_container_width=True)
 
-    if do_clear:
-        for p in [FAISS_PATH, CHUNKS_PATH]:
-            if os.path.exists(p): os.remove(p)
-        st.session_state.index = None
-        st.session_state.chunks = []
+    # ── Provider selector ──
+    st.markdown("### 🤖 AI Provider")
+    selected_provider = st.selectbox(
+        label="Choose provider",
+        options=PROVIDER_OPTIONS,
+        index=PROVIDER_OPTIONS.index(st.session_state.provider),
+        label_visibility="collapsed",
+    )
+    st.session_state.provider = selected_provider
+
+    # ── Provider info card ──
+    if selected_provider.startswith("OpenRouter"):
+        st.info(
+            "**OpenRouter** — free auto-router\n\n"
+            "Key: `OPENROUTER_API_KEY`\n"
+            "Get key → [openrouter.ai/keys](https://openrouter.ai/keys)\n\n"
+            "Models: openrouter/free → Llama 3.3 70B → Nemotron Super → Trinity Large"
+        )
+    elif selected_provider.startswith("Groq"):
+        st.info(
+            "**Groq** — fastest free inference (LPU)\n\n"
+            "Key: `GROQ_API_KEY`\n"
+            "Get key → [console.groq.com](https://console.groq.com) *(no credit card)*\n\n"
+            "Models: Llama 3.3 70B → Llama 3.1 8B → Qwen3 32B\n"
+            "Limits: 500K tokens/day free"
+        )
+    else:
+        st.info(
+            "**Hugging Face** — 100K+ open models\n\n"
+            "Key: `HF_API_TOKEN`\n"
+            "Get token → [hf.co/settings/tokens](https://huggingface.co/settings/tokens) *(Read only)*\n\n"
+            "Models: Llama 3.2 3B → Llama 3 8B → Zephyr 7B → Mistral 7B\n"
+            "Limits: ~few hundred req/hour free"
+        )
+
+    st.markdown("---")
+
+    # ── PDF upload ──
+    st.markdown("### 📂 Upload Notes")
+    uploaded_files = st.file_uploader(
+        "Drop PDFs here",
+        type="pdf",
+        accept_multiple_files=True,
+        label_visibility="collapsed",
+    )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        process_btn = st.button("⚙️ Process", use_container_width=True)
+    with col2:
+        clear_btn = st.button("🗑️ Clear", use_container_width=True)
+
+    if clear_btn:
+        for path in [FAISS_PATH, CHUNKS_PATH]:
+            if os.path.exists(path):
+                os.remove(path)
+        st.session_state.index    = None
+        st.session_state.chunks   = []
         st.session_state.messages = []
-        st.session_state.ready = False
-        st.rerun()
+        st.session_state.loaded   = False
+        st.success("✅ Data cleared.")
 
-    if do_process and uploaded:
+    if process_btn and uploaded_files:
         all_text = ""
-        with st.spinner("Extracting knowledge..."):
-            for f in uploaded:
-                all_text += read_pdf(f) + " "
-        
+        with st.spinner("Reading PDFs…"):
+            for file in uploaded_files:
+                all_text += read_pdf(file) + " "
         if all_text.strip():
             chunks = chunk_text(all_text)
-            with st.spinner(f"Indexing {len(chunks)} fragments..."):
-                vecs = model.encode(chunks)
-                idx = faiss.IndexFlatL2(vecs.shape[1])
-                idx.add(np.array(vecs))
-            
-            st.session_state.index = idx
+            with st.spinner(f"Indexing {len(chunks)} chunks…"):
+                embeddings = embed_model.encode(chunks, show_progress_bar=False)
+                dimension  = embeddings.shape[1]
+                index      = faiss.IndexFlatL2(dimension)
+                index.add(np.array(embeddings))
+            st.session_state.index  = index
             st.session_state.chunks = chunks
-            st.session_state.ready = True
-            
+            st.session_state.loaded = True
             os.makedirs(STORAGE_DIR, exist_ok=True)
-            faiss.write_index(idx, FAISS_PATH)
+            faiss.write_index(index, FAISS_PATH)
             with open(CHUNKS_PATH, "wb") as f:
                 pickle.dump(chunks, f)
-            st.success(f"Indexed {len(uploaded)} files!")
+            st.success(f"✅ {len(uploaded_files)} file(s) — {len(chunks)} chunks ready.")
         else:
-            st.error("No readable text found in PDFs.")
+            st.warning("No readable text found in the uploaded PDFs.")
+    elif process_btn:
+        st.info("Please upload at least one PDF first.")
 
     st.markdown("---")
-    if st.session_state.ready:
-        st.markdown(f"✅ **{len(st.session_state.chunks)}** notes fragments loaded.")
+    if st.session_state.index is not None:
+        st.markdown(
+            f"<small>📚 {len(st.session_state.chunks)} chunks loaded</small>",
+            unsafe_allow_html=True,
+        )
     else:
-        st.markdown("⚠️ No notes indexed.")
-    
-    if st.button("🧹 Reset Chat", use_container_width=True):
+        st.markdown("<small>No document loaded yet.</small>", unsafe_allow_html=True)
+
+    if st.button("🧹 Clear Chat", use_container_width=True):
         st.session_state.messages = []
         st.rerun()
 
 # ─────────────────────────────────────────────
-#  MAIN LOGIC
+#  MAIN AREA
 # ─────────────────────────────────────────────
-st.title("📘 AI Study Assistant")
-st.markdown("<p style='color:#6e7681; font-size: 1.1rem; margin-top:-1rem;'>Upload notes to chat with your materials</p>", unsafe_allow_html=True)
+st.markdown("# 📘 AI Study Assistant")
+st.markdown(
+    "<p style='color:#888;margin-top:-12px;font-size:0.9rem;'>"
+    "Upload your notes → Ask anything → Get smart answers</p>",
+    unsafe_allow_html=True,
+)
+st.divider()
 
-# Initial Help
-if not st.session_state.ready:
-    st.info("👋 **Welcome!** Start by uploading your PDF study notes in the sidebar and clicking **Process**.")
+if st.session_state.index is None:
+    st.info("⬅️ Upload your PDF notes and click **⚙️ Process** to get started.")
 
-# Render history
-for m in st.session_state.messages:
-    with st.chat_message(m["role"]):
-        st.markdown(m["content"])
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
 
-# Local Greeting detection
-GREETINGS = ["hi", "hello", "hey", "who are you", "what are you", "thanks", "thank you"]
+# ─────────────────────────────────────────────
+#  CHAT INPUT
+# ─────────────────────────────────────────────
+query = st.chat_input("Ask something from your notes…")
 
-# Chat Input
-query = st.chat_input("Ask a question about your notes...")
+GREETING_TRIGGERS = {
+    "hi", "hello", "hey", "hiya", "howdy", "greetings",
+    "good morning", "good afternoon", "good evening",
+    "thanks", "thank you", "ty", "thx",
+    "bye", "goodbye", "see you",
+    "who are you", "what are you", "what can you do",
+}
+
+def is_greeting(text: str) -> str | None:
+    t = text.strip().lower().rstrip("!.,?")
+    if t in GREETING_TRIGGERS:
+        if t in {"hi", "hello", "hey", "hiya", "howdy", "greetings"}:
+            return "👋 Hello! I'm your AI Study Assistant. Upload your PDF notes and ask me anything about them!"
+        if t in {"good morning", "good afternoon", "good evening"}:
+            return "😊 Good day! Ready to help you study. Upload your notes and fire away!"
+        if t in {"thanks", "thank you", "ty", "thx"}:
+            return "You're welcome! 😊 Feel free to ask more questions."
+        if t in {"bye", "goodbye", "see you"}:
+            return "Goodbye! Good luck with your studies! 📚"
+        if t in {"who are you", "what are you", "what can you do"}:
+            return (
+                "I'm your **AI Study Assistant** 📘\n\n"
+                "Here's what I can do:\n"
+                "- 📄 Read your uploaded PDF notes\n"
+                "- 🔍 Find the most relevant passages for your question\n"
+                "- 💬 Give clear, structured answers based on your material\n"
+                "- 🧠 Remember our conversation history for follow-up questions"
+            )
+    return None
+
 
 if query:
-    # ── Immediate render for user
-    st.session_state.messages.append({"role": "user", "content": query})
-    with st.chat_message("user"):
-        st.markdown(query)
-
-    # ── Logic
-    q_low = query.lower().strip().rstrip("!?.")
-    
-    if q_low in GREETINGS:
-        ans = "👋 Hello! I'm your AI Study Assistant. Upload some PDFs and I'll help you master the material!"
-        if q_low in ["thanks", "thank you"]: ans = "You're very welcome! Happy studying! 📚"
-    elif not st.session_state.ready:
-        ans = "⚠️ I need your study notes first! Please **upload and process** PDFs in the sidebar."
+    canned = is_greeting(query)
+    if canned:
+        st.session_state.messages.append({"role": "user",      "content": query})
+        st.session_state.messages.append({"role": "assistant", "content": canned})
+        with st.chat_message("user"):      st.markdown(query)
+        with st.chat_message("assistant"): st.markdown(canned)
+    elif st.session_state.index is None:
+        st.warning("⬅️ Please upload and process your PDFs first.")
     else:
+        st.session_state.messages.append({"role": "user", "content": query})
+        with st.chat_message("user"):
+            st.markdown(query)
         with st.chat_message("assistant"):
-            with st.spinner("Analyzing notes..."):
-                ctx = get_context(query)
-                hist = st.session_state.messages[:-1]
-                ans = ask_llm(ctx, query, hist)
-    
-    # Render and store assistant reply
-    if q_low in GREETINGS or not st.session_state.ready:
-        with st.chat_message("assistant"):
-            st.markdown(ans)
-    else:
-        st.markdown(ans)
-        
-    st.session_state.messages.append({"role": "assistant", "content": ans})
+            with st.spinner("Thinking…"):
+                context = retrieve_context(query)
+                history = st.session_state.messages[:-1]
+                answer  = ask_llm(context, query, history)
+            st.markdown(answer)
+        st.session_state.messages.append({"role": "assistant", "content": answer})
