@@ -242,7 +242,7 @@ def ask_llm(context: str, question: str, history: list[dict]) -> str:
         except requests.exceptions.ConnectionError:
             return "🌐 **Network error.** Check your internet connection and try again."
         except requests.exceptions.HTTPError as e:
-            status = e.response.status_code if e.response else 0
+            status = e.response.status_code if e.response is not None else 0
             if status == 401:
                 return "🔑 **Invalid API key.** Please check your `OPENROUTER_API_KEY`."
             if status == 429:
@@ -375,26 +375,61 @@ for msg in st.session_state.messages:
 # ─────────────────────────────────────────────
 query = st.chat_input("Ask something from your notes…")
 
+# ── Greeting detection (no API call needed) ──
+GREETING_TRIGGERS = {
+    "hi", "hello", "hey", "hiya", "howdy", "greetings",
+    "good morning", "good afternoon", "good evening",
+    "thanks", "thank you", "ty", "thx",
+    "bye", "goodbye", "see you",
+    "who are you", "what are you", "what can you do",
+}
+
+def is_greeting(text: str) -> str | None:
+    """Return a canned reply if the message is a casual greeting, else None."""
+    t = text.strip().lower().rstrip("!.,?")
+    if t in GREETING_TRIGGERS:
+        if t in {"hi", "hello", "hey", "hiya", "howdy", "greetings"}:
+            return "👋 Hello! I'm your AI Study Assistant. Upload your PDF notes and ask me anything about them!"
+        if t in {"good morning", "good afternoon", "good evening"}:
+            return "😊 Good day! Ready to help you study. Upload your notes and fire away!"
+        if t in {"thanks", "thank you", "ty", "thx"}:
+            return "You're welcome! 😊 Feel free to ask more questions."
+        if t in {"bye", "goodbye", "see you"}:
+            return "Goodbye! Good luck with your studies! 📚"
+        if t in {"who are you", "what are you", "what can you do"}:
+            return (
+                "I'm your **AI Study Assistant** 📘\n\n"
+                "Here's what I can do:\n"
+                "- 📄 Read your uploaded PDF notes\n"
+                "- 🔍 Find the most relevant passages for your question\n"
+                "- 💬 Give clear, structured answers based on your material\n"
+                "- 🧠 Remember our conversation history for follow-up questions"
+            )
+    return None
+
+
 if query:
-    if st.session_state.index is None:
+    # Check for greeting first — no API call needed
+    canned = is_greeting(query)
+    if canned:
+        st.session_state.messages.append({"role": "user",      "content": query})
+        st.session_state.messages.append({"role": "assistant", "content": canned})
+        with st.chat_message("user"):      st.markdown(query)
+        with st.chat_message("assistant"): st.markdown(canned)
+    elif st.session_state.index is None:
         st.warning("⬅️ Please upload and process your PDFs first.")
-        st.stop()
+    else:
+        # Show user message immediately
+        st.session_state.messages.append({"role": "user", "content": query})
+        with st.chat_message("user"):
+            st.markdown(query)
 
-    # Show user message immediately
-    st.session_state.messages.append({"role": "user", "content": query})
-    with st.chat_message("user"):
-        st.markdown(query)
+        # Retrieve + generate
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking…"):
+                context = retrieve_context(query)
+                history = st.session_state.messages[:-1]
+                answer  = ask_llm(context, query, history)
+            st.markdown(answer)
 
-    # Retrieve + generate
-    with st.chat_message("assistant"):
-        with st.spinner("Thinking…"):
-            context = retrieve_context(query)
-
-            # Build history without the just-appended user message
-            history = st.session_state.messages[:-1]
-
-            answer = ask_llm(context, query, history)
-
-        st.markdown(answer)
-
-    st.session_state.messages.append({"role": "assistant", "content": answer})
+        st.session_state.messages.append({"role": "assistant", "content": answer})
