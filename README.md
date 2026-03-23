@@ -1,3 +1,4 @@
+
 # 📘 AI Study Assistant (RAG + Local LLM)
 
 ## 🚀 Overview
@@ -30,3 +31,7 @@ An AI-powered study assistant that processes PDF documents and generates structu
 pip install -r requirements.txt
 ollama run phi
 streamlit run app.py
+=======
+# ai-study-assistant-rag
+AI-powered study assistant using Retrieval-Augmented Generation (RAG) that processes PDF documents and generates structured answers using a local LLM (Ollama).
+
