@@ -107,12 +107,12 @@ FAISS_PATH         = os.path.join(STORAGE_DIR, "index.faiss")
 CHUNKS_PATH        = os.path.join(STORAGE_DIR, "chunks.pkl")
 OPENROUTER_URL     = "https://openrouter.ai/api/v1/chat/completions"
 
-# Fallback sequence for robustness (skips on 400, 404, 429)
+# Fallback sequence for robustness (skips on 400, 404, 422, 429)
 LLM_MODELS = [
     "deepseek/deepseek-chat:free",
     "meta-llama/llama-3.1-8b-instruct:free",
     "mistralai/mistral-7b-instruct:free",
-    "google/gemma-3-12b-it:free",
+    "google/gemma-2-9b-it:free",
 ]
 
 MAX_CONTEXT_WORDS  = 600
@@ -187,16 +187,16 @@ def _call_api(model_id: str, messages: list, api_key: str) -> requests.Response:
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type":  "application/json",
-            "HTTP-Referer":  "https://ai-study-assistant.streamlit.app",
+            "HTTP-Referer":  "http://localhost:8501",
             "X-Title":       "AI Study Assistant",
         },
         json={
             "model": model_id,
             "messages": messages,
-            "temperature": 0.4,
+            "temperature": 0.3,
             "max_tokens": 1024,
         },
-        timeout=25
+        timeout=15
     )
 
 
@@ -208,13 +208,24 @@ def ask_llm(context: str, query: str, history: list[dict]) -> str:
 
     messages = build_messages(context, query, history)
     
-    # Fallback Loop: Skips transient errors (400, 404, 429)
+    last_err_info = "Status Unknown"
+    
+    # Fallback Loop: Skips transient errors (400, 404, 422, 429)
     for model_id in LLM_MODELS:
         try:
             resp = _call_api(model_id, messages, api_key)
             
-            # If rate limited (429) or model missing (404) or bad data (400) → try next
-            if resp.status_code in (400, 404, 429):
+            # If 401 (Unauthorized) → fail immediately (bad key)
+            if resp.status_code == 401:
+                return "🔑 **Invalid API key.** Please check your `OPENROUTER_API_KEY`."
+                
+            # If model/data error (400, 404, 422, 429) → try next
+            if resp.status_code in (400, 404, 422, 429):
+                try:
+                    data = resp.json().get("error", {}).get("message", f"Status {resp.status_code}")
+                    last_err_info = f"Model `{model_id}` → {data}"
+                except:
+                    last_err_info = f"Model `{model_id}` → Status {resp.status_code}"
                 continue
                 
             resp.raise_for_status()
@@ -223,12 +234,18 @@ def ask_llm(context: str, query: str, history: list[dict]) -> str:
             if "choices" in data and data["choices"]:
                 return data["choices"][0]["message"]["content"].strip()
                 
-            continue # Try next if choice is empty
+            last_err_info = f"Model `{model_id}` → Empty response"
+            continue 
             
-        except Exception:
-            continue # Try next on network/timeout errors
+        except Exception as e:
+            last_err_info = f"Model `{model_id}` → Connection Error: {str(e)[:50]}"
+            continue 
             
-    return "🚀 **Models are currently busy.** All fallback attempts failed. Please wait 15s and try again."
+    return (
+        f"🚀 **All models are currently busy.**\n\n"
+        f"**Technical Details:** {last_err_info}\n\n"
+        "Please wait 10s and try again, or check your API key and balance."
+    )
 
 
 # ─────────────────────────────────────────────
