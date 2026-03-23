@@ -164,7 +164,7 @@ def build_messages(context: str, question: str, history: list[dict]) -> list[dic
         "## Guidelines\n"
         "- Answer **only** from the provided context when a factual question is asked.\n"
         "- If the context does not contain the answer, say: "
-        "\"I couldn't find that in your uploaded notes. Could you check the document or rephrase?\"\n"
+        "\"I couldn’t find a clear answer in your uploaded notes. Try asking in a different way or upload more relevant material.\"\n"
         "- Structure long answers with **Markdown headings**, bullet points, or numbered lists.\n"
         "- Keep answers concise yet complete. Avoid padding or repetition.\n"
         "- When greeted or asked a casual question, respond naturally.\n"
@@ -466,39 +466,73 @@ for msg in st.session_state.messages:
 # ─────────────────────────────────────────────
 query = st.chat_input("Ask something from your notes…")
 
-GREETING_TRIGGERS = {
-    "hi", "hello", "hey", "hiya", "howdy", "greetings",
-    "good morning", "good afternoon", "good evening",
-    "thanks", "thank you", "ty", "thx",
-    "bye", "goodbye", "see you",
-    "who are you", "what are you", "what can you do",
+# ─────────────────────────────────────────────
+#  COMMON RESPONSES (FAQ)
+# ─────────────────────────────────────────────
+COMMON_RESPONSES = {
+    "name": "I’m your AI Study Assistant. You can think of me as a smart helper designed to make learning faster and easier for you.",
+    "help": "I can help you understand concepts from your notes, summarize information, and answer questions clearly. Just upload your study material and ask anything — I’ll do my best to give structured, easy-to-understand answers.",
+    "capabilities": "I can:\n\n- Explain concepts from your uploaded notes\n- Provide short and clear answers\n- Summarize large content\n- Help you revise quickly before exams",
+    "better_than_google": "I work differently. Instead of showing multiple links, I give you direct answers based on your notes, which can save time and help you focus on what matters.",
+    "answer_everything": "I’m best at answering questions based on the notes you provide. If something isn’t in your material, I might not give a complete answer.",
+    "hi": "Hey! 👋 How can I help you today?",
+    "thanks": "You’re welcome! 😊 Let me know if you need anything else.",
+    "explain_again": "Sure! Let me break it down more simply:\n\n👉 (then explanation)",
+    "short_answer": "Here’s a concise version:\n\n👉 (short bullet points)",
+    "not_understand": "No problem — let’s simplify it:\n\n👉 (very basic explanation)",
+    "summarize": "Here’s a quick summary:\n\n- Key point 1\n- Key point 2\n- Key point 3",
+    "help_more": "Of course! Just ask your next question or upload more material — I’m here to help.",
+    "why_use": "Because it helps you focus on your own study material, gives direct answers, and saves time compared to searching through multiple sources."
 }
 
-def is_greeting(text: str) -> str | None:
+def is_common_query(text: str) -> str | None:
     t = text.strip().lower().rstrip("!.,?")
-    if t in GREETING_TRIGGERS:
-        if t in {"hi", "hello", "hey", "hiya", "howdy", "greetings"}:
-            return "👋 Hello! I'm your AI Study Assistant. Upload your PDF notes and ask me anything about them!"
-        if t in {"good morning", "good afternoon", "good evening"}:
-            return "😊 Good day! Ready to help you study. Upload your notes and fire away!"
-        if t in {"thanks", "thank you", "ty", "thx"}:
-            return "You're welcome! 😊 Feel free to ask more questions."
-        if t in {"bye", "goodbye", "see you"}:
-            return "Goodbye! Good luck with your studies! 📚"
-        if t in {"who are you", "what are you", "what can you do"}:
-            return (
-                "I'm your **AI Study Assistant** 📘\n\n"
-                "Here's what I can do:\n"
-                "- 📄 Read your uploaded PDF notes\n"
-                "- 🔍 Find the most relevant passages for your question\n"
-                "- 💬 Give clear, structured answers based on your material\n"
-                "- 🧠 Remember our conversation history for follow-up questions"
-            )
+    
+    # 1. Name
+    if any(x in t for x in ["what is your name", "who are you", "what are you"]):
+        return COMMON_RESPONSES["name"]
+    # 2. Help
+    if any(x in t for x in ["how can you help", "how will you be helpful", "help me"]):
+        if len(t.split()) < 8: return COMMON_RESPONSES["help"]
+    # 3. Capabilities
+    if any(x in t for x in ["what can you do", "features", "capabilities"]):
+        return COMMON_RESPONSES["capabilities"]
+    # 4. Better than Google
+    if "better than google" in t:
+        return COMMON_RESPONSES["better_than_google"]
+    # 5. Answer everything
+    if any(x in t for x in ["can you answer any", "answer everything", "answer any question"]):
+        return COMMON_RESPONSES["answer_everything"]
+    # 6. Greet
+    if any(x in t for x in ["hi", "hello", "hey", "hiya", "howdy", "greetings"]):
+        return COMMON_RESPONSES["hi"]
+    # 7. Thanks
+    if any(x in t for x in ["thank you", "thanks", "ty", "thx"]):
+        return COMMON_RESPONSES["thanks"]
+    # 8. Explain again
+    if "explain again" in t:
+        return COMMON_RESPONSES["explain_again"]
+    # 9. Short answer
+    if "short answer" in t:
+        return COMMON_RESPONSES["short_answer"]
+    # 10. Don't understand
+    if any(x in t for x in ["i don't understand", "do not understand", "i dont understand"]):
+        return COMMON_RESPONSES["not_understand"]
+    # 11. Summarize
+    if "summarize this" in t or (t == "summarize"):
+        return COMMON_RESPONSES["summarize"]
+    # 12. Help more
+    if "help me further" in t or "help me more" in t:
+        return COMMON_RESPONSES["help_more"]
+    # 14. Why use
+    if "why should i use" in t or "why this assistant" in t:
+        return COMMON_RESPONSES["why_use"]
+        
     return None
 
 
 if query:
-    canned = is_greeting(query)
+    canned = is_common_query(query)
     if canned:
         st.session_state.messages.append({"role": "user",      "content": query})
         st.session_state.messages.append({"role": "assistant", "content": canned})
