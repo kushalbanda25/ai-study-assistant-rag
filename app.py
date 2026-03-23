@@ -46,7 +46,7 @@ Answer:
         "Content-Type": "application/json"
     },
     json={
-        "model": "mistralai/mistral-7b-instruct:free",
+        "model": "google/gemma-2b-it:free",
         "messages": [
             {"role": "user", "content": prompt}
         ]
