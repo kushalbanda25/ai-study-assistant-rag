@@ -8,182 +8,381 @@ import pickle
 import os
 import requests
 
-# -------------------- CONFIG --------------------
-st.set_page_config(page_title="AI Study Assistant", layout="centered")
+# ─────────────────────────────────────────────
+#  PAGE CONFIG
+# ─────────────────────────────────────────────
+st.set_page_config(
+    page_title="AI Study Assistant",
+    page_icon="📘",
+    layout="centered",
+    initial_sidebar_state="expanded",
+)
 
-# -------------------- LOAD MODEL --------------------
-@st.cache_resource
-def load_model():
-    return SentenceTransformer('all-MiniLM-L6-v2')
+# ─────────────────────────────────────────────
+#  GLOBAL STYLES  (ChatGPT-like)
+# ─────────────────────────────────────────────
+st.markdown("""
+<style>
+/* ── Base ── */
+html, body, [data-testid="stAppViewContainer"] {
+    background: #0f0f0f;
+    color: #ececec;
+    font-family: 'Segoe UI', sans-serif;
+}
+
+/* ── Sidebar ── */
+[data-testid="stSidebar"] {
+    background: #1a1a1a;
+    border-right: 1px solid #2a2a2a;
+}
+[data-testid="stSidebar"] * { color: #d1d1d1 !important; }
+
+/* ── Main title area ── */
+h1 { color: #ffffff !important; font-weight: 700; letter-spacing: -0.5px; }
+
+/* ── Chat messages ── */
+[data-testid="stChatMessage"] {
+    border-radius: 12px;
+    padding: 4px 8px;
+    margin-bottom: 6px;
+}
+
+/* User bubble */
+[data-testid="stChatMessage"][data-testid*="user"],
+div[data-testid="stChatMessage"]:has(img[alt="user"]) {
+    background: #1e1e2e;
+}
+
+/* Assistant bubble */
+div[data-testid="stChatMessage"]:has(img[alt="assistant"]) {
+    background: #161b22;
+}
+
+/* ── Chat input ── */
+[data-testid="stChatInputTextArea"] {
+    background: #1e1e1e !important;
+    color: #ececec !important;
+    border: 1px solid #3a3a3a !important;
+    border-radius: 12px !important;
+}
+
+/* ── Buttons ── */
+.stButton > button {
+    background: #2d2d2d;
+    color: #ececec;
+    border: 1px solid #3a3a3a;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    transition: background 0.2s;
+}
+.stButton > button:hover { background: #3d3d3d; }
+
+/* ── Info / warning boxes ── */
+.stAlert { border-radius: 10px; font-size: 0.9rem; }
+
+/* ── Spinner text ── */
+.stSpinner > div { color: #a0a0a0 !important; }
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
+</style>
+""", unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────
+#  MODEL CACHE
+# ─────────────────────────────────────────────
+@st.cache_resource(show_spinner="Loading embedding model…")
+def load_model() -> SentenceTransformer:
+    return SentenceTransformer("all-MiniLM-L6-v2")
 
 model = load_model()
 
-# -------------------- OPENROUTER FUNCTION --------------------
-def ask_llm(context, question):
-    prompt = f"""
-You are a helpful study assistant.
+# ─────────────────────────────────────────────
+#  CONSTANTS
+# ─────────────────────────────────────────────
+STORAGE_DIR        = "storage"
+FAISS_PATH         = os.path.join(STORAGE_DIR, "index.faiss")
+CHUNKS_PATH        = os.path.join(STORAGE_DIR, "chunks.pkl")
+OPENROUTER_URL     = "https://openrouter.ai/api/v1/chat/completions"
+LLM_MODEL          = "google/gemini-2.0-flash-exp:free"   # upgrade from gemma-2b
+MAX_CONTEXT_WORDS  = 600
+TOP_K_CHUNKS       = 3
+MAX_HISTORY_TURNS  = 6   # keep last N user+assistant pairs
 
-Rules:
-- If greeting → respond normally
-- Else → answer ONLY from context
-- Use bullet points
-- Keep answers short and clear
+# ─────────────────────────────────────────────
+#  PDF UTILITIES
+# ─────────────────────────────────────────────
+def read_pdf(file) -> str:
+    text = ""
+    try:
+        pdf = PdfReader(file)
+        for page in pdf.pages:
+            content = page.extract_text()
+            if content:
+                text += content + " "
+    except Exception as e:
+        st.sidebar.error(f"Could not read PDF: {e}")
+    return re.sub(r'\s+', ' ', text).strip()
 
-Context:
-{context}
 
-Question:
-{question}
+def chunk_text(text: str, chunk_size: int = 120) -> list[str]:
+    words = text.split()
+    return [" ".join(words[i:i + chunk_size]) for i in range(0, len(words), chunk_size)]
 
-Answer:
-"""
+
+# ─────────────────────────────────────────────
+#  RAG: RETRIEVE CONTEXT
+# ─────────────────────────────────────────────
+def retrieve_context(query: str) -> str:
+    """Return the top-K most relevant chunks, capped at MAX_CONTEXT_WORDS."""
+    index  = st.session_state.index
+    chunks = st.session_state.chunks
+
+    query_vec = model.encode([query])
+    k         = min(TOP_K_CHUNKS, len(chunks))
+    _, I      = index.search(np.array(query_vec), k=k)
+
+    selected = [chunks[i] for i in I[0] if i < len(chunks)]
+
+    # Limit total context length
+    context_words = []
+    for chunk in selected:
+        words = chunk.split()
+        if len(context_words) + len(words) > MAX_CONTEXT_WORDS:
+            remaining = MAX_CONTEXT_WORDS - len(context_words)
+            if remaining > 0:
+                context_words.extend(words[:remaining])
+            break
+        context_words.extend(words)
+
+    return " ".join(context_words)
+
+
+# ─────────────────────────────────────────────
+#  LLM CALL
+# ─────────────────────────────────────────────
+def build_messages(context: str, question: str, history: list[dict]) -> list[dict]:
+    """Construct the full message list: system → trimmed history → new user turn."""
+    system_prompt = (
+        "You are an expert AI study assistant. "
+        "Your job is to help students understand their study material precisely and clearly.\n\n"
+        "## Guidelines\n"
+        "- Answer **only** from the provided context when a factual question is asked.\n"
+        "- If the context does not contain the answer, say: "
+        "\"I couldn't find that in your uploaded notes. Could you check the document or rephrase?\"\n"
+        "- Structure long answers with **Markdown headings**, bullet points, or numbered lists.\n"
+        "- Keep answers concise yet complete. Avoid padding or repetition.\n"
+        "- When greeted or asked a casual question, respond naturally.\n"
+        "- Never fabricate facts or invent information not present in the context.\n"
+        "- If the question is ambiguous, ask a clarifying follow-up.\n\n"
+        f"## Study Context\n{context}"
+    )
+
+    messages: list[dict] = [{"role": "system", "content": system_prompt}]
+
+    # Inject trimmed conversation history
+    trim = history[-(MAX_HISTORY_TURNS * 2):]
+    messages.extend(trim)
+
+    # Append current user question
+    messages.append({"role": "user", "content": question})
+    return messages
+
+
+def ask_llm(context: str, question: str, history: list[dict]) -> str:
+    api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+    if not api_key:
+        return (
+            "⚠️ **API key not set.** "
+            "Please set the `OPENROUTER_API_KEY` environment variable and restart the app."
+        )
+
+    messages = build_messages(context, question, history)
 
     try:
         response = requests.post(
-    url="https://openrouter.ai/api/v1/chat/completions",
-    headers={
-        "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
-        "Content-Type": "application/json"
-    },
-    json={
-        "model": "google/gemma-2b-it:free",
-        "messages": [
-            {"role": "user", "content": prompt}
-        ]
-    }
-)
-
+            url=OPENROUTER_URL,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type":  "application/json",
+                "HTTP-Referer":  "https://ai-study-assistant",
+                "X-Title":       "AI Study Assistant",
+            },
+            json={
+                "model":       LLM_MODEL,
+                "messages":    messages,
+                "temperature": 0.3,
+                "max_tokens":  1024,
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
         result = response.json()
 
-        if "choices" in result:
-            return result["choices"][0]["message"]["content"]
-        else:
-            return f"⚠️ API Error: {result}"
+        if "choices" in result and result["choices"]:
+            return result["choices"][0]["message"]["content"].strip()
 
+        # Surface API-level errors clearly
+        error_msg = result.get("error", {}).get("message", str(result))
+        return f"⚠️ **API responded unexpectedly:** {error_msg}"
+
+    except requests.exceptions.Timeout:
+        return "⏳ **Request timed out.** The AI service is taking too long. Please try again."
+    except requests.exceptions.ConnectionError:
+        return "🌐 **Network error.** Check your internet connection and try again."
+    except requests.exceptions.HTTPError as e:
+        status = e.response.status_code if e.response else "unknown"
+        if status == 401:
+            return "🔑 **Invalid API key.** Please check your `OPENROUTER_API_KEY`."
+        if status == 429:
+            return "🚦 **Rate limit reached.** Please wait a moment and try again."
+        return f"⚠️ **HTTP error {status}.** {str(e)}"
     except Exception as e:
-        return f"⚠️ Exception: {str(e)}"
+        return f"⚠️ **Unexpected error:** {str(e)}"
 
 
-# -------------------- FUNCTIONS --------------------
-def read_pdf(file):
-    text = ""
-    pdf = PdfReader(file)
+# ─────────────────────────────────────────────
+#  SESSION STATE INIT
+# ─────────────────────────────────────────────
+if "index"    not in st.session_state: st.session_state.index    = None
+if "chunks"   not in st.session_state: st.session_state.chunks   = []
+if "messages" not in st.session_state: st.session_state.messages = []
+if "loaded"   not in st.session_state: st.session_state.loaded   = False
 
-    for page in pdf.pages:
-        content = page.extract_text()
-        if content:
-            text += content + " "
+# ─────────────────────────────────────────────
+#  AUTO-LOAD SAVED FAISS INDEX
+# ─────────────────────────────────────────────
+if not st.session_state.loaded and os.path.exists(FAISS_PATH):
+    try:
+        st.session_state.index  = faiss.read_index(FAISS_PATH)
+        with open(CHUNKS_PATH, "rb") as f:
+            st.session_state.chunks = pickle.load(f)
+        st.session_state.loaded = True
+    except Exception as e:
+        st.sidebar.warning(f"Could not restore saved index: {e}")
 
-    text = re.sub(r'\s+', ' ', text)
-    return text.strip()
+# ─────────────────────────────────────────────
+#  SIDEBAR
+# ─────────────────────────────────────────────
+with st.sidebar:
+    st.markdown("## 📂 Upload Notes")
+    uploaded_files = st.file_uploader(
+        "Drop your PDFs here",
+        type="pdf",
+        accept_multiple_files=True,
+        label_visibility="collapsed",
+    )
 
+    st.markdown("---")
 
-def chunk_text(text, chunk_size=100):
-    words = text.split()
-    return [" ".join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
+    col1, col2 = st.columns(2)
+    with col1:
+        process_btn = st.button("⚙️ Process", use_container_width=True)
+    with col2:
+        clear_btn = st.button("🗑️ Clear", use_container_width=True)
 
+    # Clear saved data
+    if clear_btn:
+        for path in [FAISS_PATH, CHUNKS_PATH]:
+            if os.path.exists(path):
+                os.remove(path)
+        st.session_state.index    = None
+        st.session_state.chunks   = []
+        st.session_state.messages = []
+        st.session_state.loaded   = False
+        st.success("✅ Data cleared.")
 
-# -------------------- SESSION --------------------
-if "index" not in st.session_state:
-    st.session_state.index = None
+    # Process uploaded files
+    if process_btn and uploaded_files:
+        all_text = ""
+        with st.spinner("Reading PDFs…"):
+            for file in uploaded_files:
+                all_text += read_pdf(file) + " "
 
-if "chunks" not in st.session_state:
-    st.session_state.chunks = []
+        if all_text.strip():
+            chunks = chunk_text(all_text)
+            with st.spinner(f"Indexing {len(chunks)} chunks…"):
+                embeddings = model.encode(chunks, show_progress_bar=False)
+                dimension  = embeddings.shape[1]
+                index      = faiss.IndexFlatL2(dimension)
+                index.add(np.array(embeddings))
 
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+            st.session_state.index  = index
+            st.session_state.chunks = chunks
+            st.session_state.loaded = True
 
+            os.makedirs(STORAGE_DIR, exist_ok=True)
+            faiss.write_index(index, FAISS_PATH)
+            with open(CHUNKS_PATH, "wb") as f:
+                pickle.dump(chunks, f)
 
-# -------------------- LOAD SAVED DATA --------------------
-if os.path.exists("storage/index.faiss"):
-    index = faiss.read_index("storage/index.faiss")
+            st.success(f"✅ {len(uploaded_files)} file(s) indexed — {len(chunks)} chunks ready.")
+        else:
+            st.warning("No readable text found in the uploaded PDFs.")
+    elif process_btn:
+        st.info("Please upload at least one PDF first.")
 
-    with open("storage/chunks.pkl", "rb") as f:
-        chunks = pickle.load(f)
+    # Status indicator
+    st.markdown("---")
+    if st.session_state.index is not None:
+        st.markdown(
+            f"<small>📚 {len(st.session_state.chunks)} chunks loaded</small>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown("<small>No document loaded yet.</small>", unsafe_allow_html=True)
 
-    st.session_state.index = index
-    st.session_state.chunks = chunks
+    # Clear chat history only
+    if st.button("🧹 Clear Chat", use_container_width=True):
+        st.session_state.messages = []
+        st.rerun()
 
-
-# -------------------- SIDEBAR --------------------
-st.sidebar.title("📂 Upload Notes")
-
-uploaded_files = st.sidebar.file_uploader(
-    "Upload PDFs",
-    type="pdf",
-    accept_multiple_files=True
+# ─────────────────────────────────────────────
+#  MAIN AREA
+# ─────────────────────────────────────────────
+st.markdown("# 📘 AI Study Assistant")
+st.markdown(
+    "<p style='color:#888;margin-top:-12px;font-size:0.9rem;'>"
+    "Upload your notes → Ask anything → Get smart answers</p>",
+    unsafe_allow_html=True,
 )
+st.divider()
 
-if st.sidebar.button("🗑 Clear Data"):
-    if os.path.exists("storage/index.faiss"):
-        os.remove("storage/index.faiss")
-        os.remove("storage/chunks.pkl")
-        st.sidebar.warning("Data cleared. Refresh page.")
+# ── Empty state ──
+if st.session_state.index is None:
+    st.info("⬅️ Upload your PDF notes and click **⚙️ Process** to get started.")
 
-
-# -------------------- TITLE --------------------
-st.title("📘 AI Study Assistant (Live GPT Version)")
-
-# -------------------- PROCESS FILES --------------------
-if uploaded_files:
-    all_text = ""
-
-    for file in uploaded_files:
-        all_text += read_pdf(file)
-
-    chunks = chunk_text(all_text)
-
-    with st.spinner("Processing notes..."):
-        embeddings = model.encode(chunks)
-        dimension = embeddings.shape[1]
-
-        index = faiss.IndexFlatL2(dimension)
-        index.add(np.array(embeddings))
-
-    st.session_state.index = index
-    st.session_state.chunks = chunks
-
-    os.makedirs("storage", exist_ok=True)
-    faiss.write_index(index, "storage/index.faiss")
-
-    with open("storage/chunks.pkl", "wb") as f:
-        pickle.dump(chunks, f)
-
-    st.sidebar.success("✅ Notes processed & saved")
-
-
-# -------------------- CHAT DISPLAY --------------------
+# ── Render chat history ──
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-
-# -------------------- CHAT INPUT --------------------
-query = st.chat_input("Ask something from your notes...")
+# ─────────────────────────────────────────────
+#  CHAT INPUT
+# ─────────────────────────────────────────────
+query = st.chat_input("Ask something from your notes…")
 
 if query:
     if st.session_state.index is None:
-        st.warning("Upload PDFs first")
-    else:
-        st.session_state.messages.append({"role": "user", "content": query})
+        st.warning("⬅️ Please upload and process your PDFs first.")
+        st.stop()
 
-        with st.chat_message("user"):
-            st.markdown(query)
+    # Show user message immediately
+    st.session_state.messages.append({"role": "user", "content": query})
+    with st.chat_message("user"):
+        st.markdown(query)
 
-        with st.spinner("Thinking..."):
-            query_vec = model.encode([query])
-            D, I = st.session_state.index.search(np.array(query_vec), k=2)
+    # Retrieve + generate
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking…"):
+            context = retrieve_context(query)
 
-            context = " ".join([st.session_state.chunks[i] for i in I[0]])
+            # Build history without the just-appended user message
+            history = st.session_state.messages[:-1]
 
-            answer = ask_llm(context, query)
+            answer = ask_llm(context, query, history)
 
-        st.session_state.messages.append({"role": "assistant", "content": answer})
+        st.markdown(answer)
 
-        with st.chat_message("assistant"):
-            st.markdown(answer)
-
-
-# -------------------- EMPTY STATE --------------------
-if st.session_state.index is None:
-    st.info("⬅️ Upload PDFs to begin")
+    st.session_state.messages.append({"role": "assistant", "content": answer})
