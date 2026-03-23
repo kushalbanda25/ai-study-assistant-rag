@@ -19,7 +19,7 @@ def load_model():
 model = load_model()
 
 # -------------------- HUGGINGFACE CONFIG --------------------
-API_URL = "https://router.huggingface.co/hf-inference/models/google/flan-t5-base"
+API_URL =  "https://api-inference.huggingface.co/models/google/flan-t5-base"
 
 HEADERS = {
     "Authorization": f"Bearer {os.getenv('HF_TOKEN')}",
