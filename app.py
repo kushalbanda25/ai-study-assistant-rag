@@ -107,12 +107,13 @@ FAISS_PATH         = os.path.join(STORAGE_DIR, "index.faiss")
 CHUNKS_PATH        = os.path.join(STORAGE_DIR, "chunks.pkl")
 OPENROUTER_URL     = "https://openrouter.ai/api/v1/chat/completions"
 
-# Fallback sequence for robustness (skips on 400, 404, 422, 429)
+# Fallback sequence for robustness (skips on 400, 404, 408, 422, 429)
 LLM_MODELS = [
     "deepseek/deepseek-chat:free",
     "meta-llama/llama-3.1-8b-instruct:free",
     "mistralai/mistral-7b-instruct:free",
-    "google/gemma-2-9b-it:free",
+    "google/gemini-2.0-flash-exp:free",
+    "openrouter/auto-free" # OpenRouter's auto-router for free models
 ]
 
 MAX_CONTEXT_WORDS  = 600
@@ -208,24 +209,28 @@ def ask_llm(context: str, query: str, history: list[dict]) -> str:
 
     messages = build_messages(context, query, history)
     
-    last_err_info = "Status Unknown"
+    errors = []
     
     # Fallback Loop: Skips transient errors (400, 404, 422, 429)
     for model_id in LLM_MODELS:
         try:
+            print(f"DEBUG: Attempting model {model_id}...")
             resp = _call_api(model_id, messages, api_key)
             
             # If 401 (Unauthorized) → fail immediately (bad key)
             if resp.status_code == 401:
                 return "🔑 **Invalid API key.** Please check your `OPENROUTER_API_KEY`."
                 
-            # If model/data error (400, 404, 422, 429) → try next
-            if resp.status_code in (400, 404, 422, 429):
+            # If model/data error (400, 404, 408, 422, 429) → try next
+            if resp.status_code in (400, 404, 408, 422, 429):
                 try:
-                    data = resp.json().get("error", {}).get("message", f"Status {resp.status_code}")
-                    last_err_info = f"Model `{model_id}` → {data}"
+                    msg = resp.json().get("error", {}).get("message", f"Status {resp.status_code}")
                 except:
-                    last_err_info = f"Model `{model_id}` → Status {resp.status_code}"
+                    msg = f"Status {resp.status_code}"
+                
+                err_str = f"Model `{model_id}` → {msg}"
+                print(f"DEBUG: {err_str}")
+                errors.append(err_str)
                 continue
                 
             resp.raise_for_status()
@@ -234,17 +239,21 @@ def ask_llm(context: str, query: str, history: list[dict]) -> str:
             if "choices" in data and data["choices"]:
                 return data["choices"][0]["message"]["content"].strip()
                 
-            last_err_info = f"Model `{model_id}` → Empty response"
+            errors.append(f"Model `{model_id}` → Empty response")
             continue 
             
         except Exception as e:
-            last_err_info = f"Model `{model_id}` → Connection Error: {str(e)[:50]}"
+            err_str = f"Model `{model_id}` → {str(e)[:60]}"
+            print(f"DEBUG: {err_str}")
+            errors.append(err_str)
             continue 
             
+    # If all failed, show the specific history
+    err_report = "\n".join([f"- {e}" for e in errors])
     return (
         f"🚀 **All models are currently busy.**\n\n"
-        f"**Technical Details:** {last_err_info}\n\n"
-        "Please wait 10s and try again, or check your API key and balance."
+        f"**Failure History:**\n{err_report}\n\n"
+        "Please wait 15s and try again, or check your API key / notes content."
     )
 
 
