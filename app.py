@@ -18,13 +18,51 @@ def load_model():
 
 model = load_model()
 
-# -------------------- HUGGINGFACE CONFIG --------------------
-API_URL =  "https://api-inference.huggingface.co/models/google/flan-t5-base"
+# -------------------- OPENROUTER FUNCTION --------------------
+def ask_llm(context, question):
+    prompt = f"""
+You are a helpful study assistant.
 
-HEADERS = {
-    "Authorization": f"Bearer {os.getenv('HF_TOKEN')}",
-    "Content-Type": "application/json"
-}
+Rules:
+- If greeting → respond normally
+- Else → answer ONLY from context
+- Use bullet points
+- Keep answers short and clear
+
+Context:
+{context}
+
+Question:
+{question}
+
+Answer:
+"""
+
+    try:
+        response = requests.post(
+            url="https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "mistralai/mistral-7b-instruct",
+                "messages": [
+                    {"role": "user", "content": prompt}
+                ]
+            }
+        )
+
+        result = response.json()
+
+        if "choices" in result:
+            return result["choices"][0]["message"]["content"]
+        else:
+            return f"⚠️ API Error: {result}"
+
+    except Exception as e:
+        return f"⚠️ Exception: {str(e)}"
+
 
 # -------------------- FUNCTIONS --------------------
 def read_pdf(file):
@@ -45,49 +83,6 @@ def chunk_text(text, chunk_size=100):
     return [" ".join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
 
 
-def ask_llm(context, question):
-    prompt = f"""
-You are a helpful study assistant.
-
-Rules:
-- If greeting → reply normally
-- Else → answer ONLY from context
-- Use bullet points
-- Keep answers short and clear
-
-Context:
-{context}
-
-Question:
-{question}
-
-Answer:
-"""
-
-    try:
-        response = requests.post(
-            API_URL,
-            headers=HEADERS,
-            json={"inputs": prompt}
-        )
-
-        if response.status_code == 200:
-            result = response.json()
-            return result[0]["generated_text"]
-
-        elif response.status_code == 503:
-            return "⏳ Model loading... try again in few seconds."
-
-        elif response.status_code == 401:
-            return "❌ Invalid API token."
-
-        else:
-            return f"⚠️ API Error: {response.text}"
-
-    except Exception as e:
-        return f"⚠️ Exception: {str(e)}"
-
-
 # -------------------- SESSION --------------------
 if "index" not in st.session_state:
     st.session_state.index = None
@@ -98,41 +93,51 @@ if "chunks" not in st.session_state:
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# -------------------- LOAD SAVED --------------------
+
+# -------------------- LOAD SAVED DATA --------------------
 if os.path.exists("storage/index.faiss"):
     index = faiss.read_index("storage/index.faiss")
+
     with open("storage/chunks.pkl", "rb") as f:
         chunks = pickle.load(f)
 
     st.session_state.index = index
     st.session_state.chunks = chunks
 
-# -------------------- SIDEBAR --------------------
-st.sidebar.title("📂 Upload PDFs")
 
-files = st.sidebar.file_uploader("Upload", type="pdf", accept_multiple_files=True)
+# -------------------- SIDEBAR --------------------
+st.sidebar.title("📂 Upload Notes")
+
+uploaded_files = st.sidebar.file_uploader(
+    "Upload PDFs",
+    type="pdf",
+    accept_multiple_files=True
+)
 
 if st.sidebar.button("🗑 Clear Data"):
     if os.path.exists("storage/index.faiss"):
         os.remove("storage/index.faiss")
         os.remove("storage/chunks.pkl")
-        st.sidebar.warning("Cleared!")
+        st.sidebar.warning("Data cleared. Refresh page.")
+
 
 # -------------------- TITLE --------------------
-st.title("📘 AI Study Assistant (Live)")
+st.title("📘 AI Study Assistant (Live GPT Version)")
 
-# -------------------- PROCESS --------------------
-if files:
-    full_text = ""
+# -------------------- PROCESS FILES --------------------
+if uploaded_files:
+    all_text = ""
 
-    for file in files:
-        full_text += read_pdf(file)
+    for file in uploaded_files:
+        all_text += read_pdf(file)
 
-    chunks = chunk_text(full_text)
+    chunks = chunk_text(all_text)
 
-    with st.spinner("Processing..."):
+    with st.spinner("Processing notes..."):
         embeddings = model.encode(chunks)
-        index = faiss.IndexFlatL2(embeddings.shape[1])
+        dimension = embeddings.shape[1]
+
+        index = faiss.IndexFlatL2(dimension)
         index.add(np.array(embeddings))
 
     st.session_state.index = index
@@ -144,14 +149,17 @@ if files:
     with open("storage/chunks.pkl", "wb") as f:
         pickle.dump(chunks, f)
 
-    st.sidebar.success("✅ Ready!")
+    st.sidebar.success("✅ Notes processed & saved")
 
-# -------------------- CHAT --------------------
+
+# -------------------- CHAT DISPLAY --------------------
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-query = st.chat_input("Ask from your notes...")
+
+# -------------------- CHAT INPUT --------------------
+query = st.chat_input("Ask something from your notes...")
 
 if query:
     if st.session_state.index is None:
@@ -163,8 +171,8 @@ if query:
             st.markdown(query)
 
         with st.spinner("Thinking..."):
-            vec = model.encode([query])
-            D, I = st.session_state.index.search(np.array(vec), k=2)
+            query_vec = model.encode([query])
+            D, I = st.session_state.index.search(np.array(query_vec), k=2)
 
             context = " ".join([st.session_state.chunks[i] for i in I[0]])
 
@@ -175,6 +183,7 @@ if query:
         with st.chat_message("assistant"):
             st.markdown(answer)
 
-# -------------------- EMPTY --------------------
+
+# -------------------- EMPTY STATE --------------------
 if st.session_state.index is None:
     st.info("⬅️ Upload PDFs to begin")
