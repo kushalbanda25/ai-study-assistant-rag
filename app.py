@@ -40,18 +40,18 @@ Answer:
 
     try:
         response = requests.post(
-            url="https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "model": "mistralai/mistral-7b-instruct",
-                "messages": [
-                    {"role": "user", "content": prompt}
-                ]
-            }
-        )
+    url="https://openrouter.ai/api/v1/chat/completions",
+    headers={
+        "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
+        "Content-Type": "application/json"
+    },
+    json={
+        "model": "openchat/openchat-3.5",
+        "messages": [
+            {"role": "user", "content": prompt}
+        ]
+    }
+)
 
         result = response.json()
 
