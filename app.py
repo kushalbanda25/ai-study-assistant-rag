@@ -77,21 +77,6 @@ OPENROUTER_MODELS = [
     "arcee-ai/trinity-large-preview:free",      # 400B, 128K ctx
 ]
 
-# ── Hugging Face Serverless Inference API ───
-#  URL  : https://api-inference.huggingface.co/models/<model-id>
-#         uses /v1/chat/completions for chat models (OpenAI-compatible)
-#  Auth : Bearer <HF_API_TOKEN>
-#  Free : ~few hundred req/hour for free users (no credit card needed)
-#  Get token at: huggingface.co/settings/tokens  (Read permission)
-HF_BASE_URL    = "https://api-inference.huggingface.co/models"
-HF_CHAT_URL    = "https://api-inference.huggingface.co/v1/chat/completions"  # OpenAI-compat
-HF_MODELS      = [
-    "meta-llama/Llama-3.2-3B-Instruct",        # small, fast, free
-    "meta-llama/Meta-Llama-3-8B-Instruct",     # reliable 8B
-    "HuggingFaceH4/zephyr-7b-beta",            # popular chat model
-    "mistralai/Mistral-7B-Instruct-v0.3",      # Mistral 7B
-]
-
 # ── Groq ────────────────────────────────────
 #  URL  : https://api.groq.com/openai/v1/chat/completions
 #  Auth : Bearer <GROQ_API_KEY>
@@ -115,7 +100,7 @@ TOP_K_CHUNKS      = 3
 MAX_HISTORY_TURNS = 6
 RETRY_WAIT_SECS   = 6
 
-PROVIDER_OPTIONS  = ["OpenRouter (free)", "Groq (free)", "Hugging Face (free)"]
+PROVIDER_OPTIONS  = ["OpenRouter (free)", "Groq (free)"]
 
 # ─────────────────────────────────────────────
 #  MODEL CACHE
@@ -321,55 +306,6 @@ def ask_groq(context: str, question: str, history: list[dict]) -> str:
     return "⚠️ **All Groq models are rate-limited.** Wait a minute and retry."
 
 
-# ── Provider: Hugging Face ────────────────────
-def ask_huggingface(context: str, question: str, history: list[dict]) -> str:
-    api_key = _get_secret("HF_API_TOKEN")
-    if not api_key:
-        return (
-            "⚠️ **Hugging Face token not set.**\n\n"
-            "In Streamlit Secrets add:\n```toml\nHF_API_TOKEN = \"hf_...\"\n```\n"
-            "Get a **free** token (no credit card) at "
-            "[huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) "
-            "(Read permission is enough)"
-        )
-    messages = build_messages(context, question, history)
-    for model_id in HF_MODELS:
-        try:
-            # HF supports OpenAI-compatible /v1/chat/completions for most chat models
-            resp = _openai_compat_post(
-                url=HF_CHAT_URL,
-                model_id=model_id,
-                messages=messages,
-                api_key=api_key,
-            )
-            if resp.status_code in (404, 503):
-                # 503 = model loading, skip to next
-                continue
-            if resp.status_code == 429:
-                time.sleep(RETRY_WAIT_SECS); continue
-            resp.raise_for_status()
-            content = _parse_openai_response(resp)
-            if content:
-                return content
-        except requests.exceptions.Timeout:
-            continue
-        except requests.exceptions.ConnectionError:
-            return "🌐 **Network error.** Check your connection."
-        except requests.exceptions.HTTPError as e:
-            status = e.response.status_code if e.response is not None else 0
-            if status == 401:
-                return "🔑 **Invalid Hugging Face token.** Check `HF_API_TOKEN`."
-            if status in (404, 503, 429):
-                if status == 429: time.sleep(RETRY_WAIT_SECS)
-                continue
-            return f"⚠️ **HTTP {status}:** {e}"
-        except Exception as e:
-            return f"⚠️ **Unexpected error:** {e}"
-    return (
-        "⚠️ **All Hugging Face models are unavailable or loading.**\n\n"
-        "HF free tier allows ~a few hundred requests/hour. "
-        "Try again in a moment or switch to Groq."
-    )
 
 
 # ── Router ────────────────────────────────────
@@ -380,7 +316,7 @@ def ask_llm(context: str, question: str, history: list[dict]) -> str:
     elif provider.startswith("Groq"):
         return ask_groq(context, question, history)
     else:
-        return ask_huggingface(context, question, history)
+        return "⚠️ Unknown provider. Please check your selection."
 
 
 # ─────────────────────────────────────────────
@@ -440,14 +376,6 @@ with st.sidebar:
             "Get key → [console.groq.com](https://console.groq.com) *(no credit card)*\n\n"
             "Models: Llama 3.3 70B → Llama 3.1 8B → Qwen3 32B\n"
             "Limits: 500K tokens/day free"
-        )
-    else:
-        st.info(
-            "**Hugging Face** — 100K+ open models\n\n"
-            "Key: `HF_API_TOKEN`\n"
-            "Get token → [hf.co/settings/tokens](https://huggingface.co/settings/tokens) *(Read only)*\n\n"
-            "Models: Llama 3.2 3B → Llama 3 8B → Zephyr 7B → Mistral 7B\n"
-            "Limits: ~few hundred req/hour free"
         )
 
     st.markdown("---")
