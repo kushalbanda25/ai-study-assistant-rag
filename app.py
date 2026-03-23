@@ -105,8 +105,13 @@ STORAGE_DIR        = "storage"
 FAISS_PATH         = os.path.join(STORAGE_DIR, "index.faiss")
 CHUNKS_PATH        = os.path.join(STORAGE_DIR, "chunks.pkl")
 OPENROUTER_URL     = "https://openrouter.ai/api/v1/chat/completions"
-LLM_MODEL          = "deepseek/deepseek-chat-v3-0324:free"
-LLM_FALLBACK       = "meta-llama/llama-3.3-70b-instruct:free"
+# Ordered list of free models to try — falls through on 404 / 429
+LLM_MODELS = [
+    "deepseek/deepseek-chat-v3-0324:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "mistralai/mistral-small-3.1-24b-instruct:free",
+    "google/gemma-3-12b-it:free",
+]
 MAX_CONTEXT_WORDS  = 600
 TOP_K_CHUNKS       = 3
 MAX_HISTORY_TURNS  = 6   # keep last N user+assistant pairs
@@ -220,12 +225,14 @@ def ask_llm(context: str, question: str, history: list[dict]) -> str:
 
     messages = build_messages(context, question, history)
 
-    # Try primary model, fall back on 404
-    for model_id in [LLM_MODEL, LLM_FALLBACK]:
+    last_error = ""
+    # Try each model in order; skip on 404 (not found) or 429 (rate limited)
+    for model_id in LLM_MODELS:
         try:
             response = _call_openrouter(model_id, messages, api_key)
 
-            if response.status_code == 404:
+            if response.status_code in (404, 429):
+                last_error = f"Model `{model_id}` returned {response.status_code}. Trying next..."
                 continue   # try next model
 
             response.raise_for_status()
@@ -245,13 +252,17 @@ def ask_llm(context: str, question: str, history: list[dict]) -> str:
             status = e.response.status_code if e.response is not None else 0
             if status == 401:
                 return "🔑 **Invalid API key.** Please check your `OPENROUTER_API_KEY`."
-            if status == 429:
-                return "🚦 **Rate limit reached.** Please wait a moment and try again."
+            if status in (404, 429):
+                last_error = f"Model `{model_id}` returned {status}."
+                continue   # try next model
             return f"⚠️ **HTTP error {status}.** {str(e)}"
         except Exception as e:
             return f"⚠️ **Unexpected error:** {str(e)}"
 
-    return "⚠️ **All models are currently unavailable.** Please try again in a moment."
+    return (
+        "🚦 **All free models are currently rate-limited.** "
+        "Please wait 10–20 seconds and try again, or check your OpenRouter quota."
+    )
 
 
 # ─────────────────────────────────────────────
