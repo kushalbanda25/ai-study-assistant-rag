@@ -105,7 +105,8 @@ STORAGE_DIR        = "storage"
 FAISS_PATH         = os.path.join(STORAGE_DIR, "index.faiss")
 CHUNKS_PATH        = os.path.join(STORAGE_DIR, "chunks.pkl")
 OPENROUTER_URL     = "https://openrouter.ai/api/v1/chat/completions"
-LLM_MODEL          = "google/gemini-2.0-flash-exp:free"   # upgrade from gemma-2b
+LLM_MODEL          = "deepseek/deepseek-chat-v3-0324:free"
+LLM_FALLBACK       = "meta-llama/llama-3.3-70b-instruct:free"
 MAX_CONTEXT_WORDS  = 600
 TOP_K_CHUNKS       = 3
 MAX_HISTORY_TURNS  = 6   # keep last N user+assistant pairs
@@ -190,6 +191,25 @@ def build_messages(context: str, question: str, history: list[dict]) -> list[dic
     return messages
 
 
+def _call_openrouter(model: str, messages: list, api_key: str) -> requests.Response:
+    return requests.post(
+        url=OPENROUTER_URL,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type":  "application/json",
+            "HTTP-Referer":  "https://ai-study-assistant",
+            "X-Title":       "AI Study Assistant",
+        },
+        json={
+            "model":       model,
+            "messages":    messages,
+            "temperature": 0.3,
+            "max_tokens":  1024,
+        },
+        timeout=30,
+    )
+
+
 def ask_llm(context: str, question: str, history: list[dict]) -> str:
     api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
     if not api_key:
@@ -200,46 +220,38 @@ def ask_llm(context: str, question: str, history: list[dict]) -> str:
 
     messages = build_messages(context, question, history)
 
-    try:
-        response = requests.post(
-            url=OPENROUTER_URL,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type":  "application/json",
-                "HTTP-Referer":  "https://ai-study-assistant",
-                "X-Title":       "AI Study Assistant",
-            },
-            json={
-                "model":       LLM_MODEL,
-                "messages":    messages,
-                "temperature": 0.3,
-                "max_tokens":  1024,
-            },
-            timeout=30,
-        )
-        response.raise_for_status()
-        result = response.json()
+    # Try primary model, fall back on 404
+    for model_id in [LLM_MODEL, LLM_FALLBACK]:
+        try:
+            response = _call_openrouter(model_id, messages, api_key)
 
-        if "choices" in result and result["choices"]:
-            return result["choices"][0]["message"]["content"].strip()
+            if response.status_code == 404:
+                continue   # try next model
 
-        # Surface API-level errors clearly
-        error_msg = result.get("error", {}).get("message", str(result))
-        return f"⚠️ **API responded unexpectedly:** {error_msg}"
+            response.raise_for_status()
+            result = response.json()
 
-    except requests.exceptions.Timeout:
-        return "⏳ **Request timed out.** The AI service is taking too long. Please try again."
-    except requests.exceptions.ConnectionError:
-        return "🌐 **Network error.** Check your internet connection and try again."
-    except requests.exceptions.HTTPError as e:
-        status = e.response.status_code if e.response else "unknown"
-        if status == 401:
-            return "🔑 **Invalid API key.** Please check your `OPENROUTER_API_KEY`."
-        if status == 429:
-            return "🚦 **Rate limit reached.** Please wait a moment and try again."
-        return f"⚠️ **HTTP error {status}.** {str(e)}"
-    except Exception as e:
-        return f"⚠️ **Unexpected error:** {str(e)}"
+            if "choices" in result and result["choices"]:
+                return result["choices"][0]["message"]["content"].strip()
+
+            error_msg = result.get("error", {}).get("message", str(result))
+            return f"⚠️ **API responded unexpectedly:** {error_msg}"
+
+        except requests.exceptions.Timeout:
+            return "⏳ **Request timed out.** The AI service is taking too long. Please try again."
+        except requests.exceptions.ConnectionError:
+            return "🌐 **Network error.** Check your internet connection and try again."
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response else 0
+            if status == 401:
+                return "🔑 **Invalid API key.** Please check your `OPENROUTER_API_KEY`."
+            if status == 429:
+                return "🚦 **Rate limit reached.** Please wait a moment and try again."
+            return f"⚠️ **HTTP error {status}.** {str(e)}"
+        except Exception as e:
+            return f"⚠️ **Unexpected error:** {str(e)}"
+
+    return "⚠️ **All models are currently unavailable.** Please try again in a moment."
 
 
 # ─────────────────────────────────────────────
