@@ -46,7 +46,7 @@ Answer:
         "Content-Type": "application/json"
     },
     json={
-        "model": "openchat/openchat-3.5",
+        "model": "mistralai/mistral-7b-instruct:free",
         "messages": [
             {"role": "user", "content": prompt}
         ]
