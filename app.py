@@ -105,13 +105,11 @@ STORAGE_DIR        = "storage"
 FAISS_PATH         = os.path.join(STORAGE_DIR, "index.faiss")
 CHUNKS_PATH        = os.path.join(STORAGE_DIR, "chunks.pkl")
 OPENROUTER_URL     = "https://openrouter.ai/api/v1/chat/completions"
-# Ordered list of free models to try — falls through on 404 / 429
-LLM_MODELS = [
-    "deepseek/deepseek-chat-v3-0324:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "mistralai/mistral-small-3.1-24b-instruct:free",
-    "google/gemma-3-12b-it:free",
-]
+
+# ✅ FIX 1: Use stable model alias (not version-pinned)
+LLM_MODEL          = "deepseek/deepseek-chat:free"
+LLM_FALLBACK       = "meta-llama/llama-3.3-70b-instruct:free"
+
 MAX_CONTEXT_WORDS  = 600
 TOP_K_CHUNKS       = 3
 MAX_HISTORY_TURNS  = 6   # keep last N user+assistant pairs
@@ -196,17 +194,18 @@ def build_messages(context: str, question: str, history: list[dict]) -> list[dic
     return messages
 
 
-def _call_openrouter(model: str, messages: list, api_key: str) -> requests.Response:
+def _call_openrouter(model_id: str, messages: list, api_key: str) -> requests.Response:
     return requests.post(
         url=OPENROUTER_URL,
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type":  "application/json",
-            "HTTP-Referer":  "https://ai-study-assistant",
+            # ✅ FIX 2: Valid URL with proper domain for HTTP-Referer
+            "HTTP-Referer":  "https://ai-study-assistant.streamlit.app",
             "X-Title":       "AI Study Assistant",
         },
         json={
-            "model":       model,
+            "model":       model_id,
             "messages":    messages,
             "temperature": 0.3,
             "max_tokens":  1024,
@@ -216,23 +215,24 @@ def _call_openrouter(model: str, messages: list, api_key: str) -> requests.Respo
 
 
 def ask_llm(context: str, question: str, history: list[dict]) -> str:
-    api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+    # ✅ FIX 3: Also read from Streamlit secrets (for Streamlit Cloud deployment)
+    api_key = st.secrets.get("OPENROUTER_API_KEY", os.getenv("OPENROUTER_API_KEY", "")).strip()
+
     if not api_key:
         return (
             "⚠️ **API key not set.** "
-            "Please set the `OPENROUTER_API_KEY` environment variable and restart the app."
+            "Add `OPENROUTER_API_KEY` to your Streamlit secrets (dashboard → Settings → Secrets) "
+            "or set it as an environment variable and restart the app."
         )
 
     messages = build_messages(context, question, history)
 
-    last_error = ""
-    # Try each model in order; skip on 404 (not found) or 429 (rate limited)
-    for model_id in LLM_MODELS:
+    # Try primary model, fall back on 404
+    for model_id in [LLM_MODEL, LLM_FALLBACK]:
         try:
             response = _call_openrouter(model_id, messages, api_key)
 
-            if response.status_code in (404, 429):
-                last_error = f"Model `{model_id}` returned {response.status_code}. Trying next..."
+            if response.status_code == 404:
                 continue   # try next model
 
             response.raise_for_status()
@@ -251,18 +251,14 @@ def ask_llm(context: str, question: str, history: list[dict]) -> str:
         except requests.exceptions.HTTPError as e:
             status = e.response.status_code if e.response is not None else 0
             if status == 401:
-                return "🔑 **Invalid API key.** Please check your `OPENROUTER_API_KEY`."
-            if status in (404, 429):
-                last_error = f"Model `{model_id}` returned {status}."
-                continue   # try next model
+                return "🔑 **Invalid API key.** Please check your `OPENROUTER_API_KEY` in Streamlit secrets."
+            if status == 429:
+                return "🚦 **Rate limit reached.** Please wait a moment and try again."
             return f"⚠️ **HTTP error {status}.** {str(e)}"
         except Exception as e:
             return f"⚠️ **Unexpected error:** {str(e)}"
 
-    return (
-        "🚦 **All free models are currently rate-limited.** "
-        "Please wait 10–20 seconds and try again, or check your OpenRouter quota."
-    )
+    return "⚠️ **All models are currently unavailable.** Please try again in a moment."
 
 
 # ─────────────────────────────────────────────
@@ -335,6 +331,9 @@ with st.sidebar:
             st.session_state.chunks = chunks
             st.session_state.loaded = True
 
+            # ✅ NOTE: On Streamlit Cloud the filesystem is ephemeral —
+            # these files won't persist across restarts, but saving still
+            # works within a single session.
             os.makedirs(STORAGE_DIR, exist_ok=True)
             faiss.write_index(index, FAISS_PATH)
             with open(CHUNKS_PATH, "wb") as f:
