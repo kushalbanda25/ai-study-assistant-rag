@@ -34,4 +34,9 @@ streamlit run app.py
 =======
 # ai-study-assistant-rag
 AI-powered study assistant using Retrieval-Augmented Generation (RAG) that processes PDF documents and generates structured answers using a local LLM (Ollama).
+## ▶️ How to Run Locally
 
+### 1. Clone the repository
+```bash
+git clone https://github.com/kushalbanda25/ai-study-assistant-rag.git
+cd ai-study-assistant-rag
